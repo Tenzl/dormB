@@ -9,7 +9,7 @@ export function loadConfig() {
     port: numberEnv("PORT", 8000),
     databaseUrl:
       process.env.DATABASE_URL ??
-      "postgresql://dormitory:dormitory@127.0.0.1:5433/dormitory",
+      "postgresql://dormitory:dormitory@127.0.0.1:5432/dormitory",
     jwtSecret: process.env.JWT_SECRET,
     jwtExpiresSeconds: Math.max(300, numberEnv("JWT_EXPIRES_SECONDS", 86400)),
     cookieSecure: (process.env.COOKIE_SECURE ?? "false") === "true",
@@ -24,6 +24,7 @@ export function loadConfig() {
     solverWorkerUrl: process.env.SOLVER_WORKER_URL ?? "http://127.0.0.1:8010",
     waitSeconds: numberEnv("WAIT_SECONDS", 120),
     countdownSeconds: numberEnv("COUNTDOWN_SECONDS", 5),
+    mockGpsIntervalMs: Math.max(250, numberEnv("MOCK_GPS_INTERVAL_MS", 1000)),
     demoMode: (process.env.DEMO_MODE ?? "true") === "true",
     corsOrigins: (
       process.env.CORS_ORIGINS ?? "http://localhost:3000,http://localhost:5173"

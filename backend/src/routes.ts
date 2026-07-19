@@ -1090,13 +1090,40 @@ export function registerRoutes(
   app.post("/api/v1/shipper/trips/ready", async (request, reply) => {
     const actor = await authenticate(db, request);
     requireRole(actor, Role.SHIPPER);
+    const body = z
+      .object({
+        start_location: z
+          .object({
+            latitude: z.number().min(-90).max(90),
+            longitude: z.number().min(-180).max(180),
+            recorded_at: z.string().datetime({ offset: true }),
+            source: z.literal("DEMO_GATE"),
+          })
+          .optional(),
+      })
+      .parse(request.body ?? {});
     const result = await idempotent(
       db,
       actor,
       request,
       "trip:ready",
-      {},
-      async () => ({ status: 201, data: await createTrip(db, config, actor) }),
+      body,
+      async () => ({
+        status: 201,
+        data: await createTrip(
+          db,
+          config,
+          actor,
+          body.start_location
+            ? {
+                latitude: body.start_location.latitude,
+                longitude: body.start_location.longitude,
+                recordedAt: body.start_location.recorded_at,
+                source: body.start_location.source,
+              }
+            : undefined,
+        ),
+      }),
     );
     return reply
       .code(result.status)
@@ -2070,6 +2097,10 @@ export function registerRoutes(
             .update(trips)
             .set({ currentStopId: next.id, updatedAt: nowIso() })
             .where(eq(trips.id, trip.id));
+          await db
+            .update(mockLocations)
+            .set({ playbackStatus: "PLAYING", recordedAt: nowIso() })
+            .where(eq(mockLocations.tripId, trip.id));
         }
         await audit(db, "STOP_COMPLETED", actor.id, trip.merchantId, trip.id, {
           stopId: stop.id,
@@ -2217,7 +2248,9 @@ export function registerRoutes(
               playbackStatus: "PAUSED",
             };
           } else if (body.action === "START" || body.action === "RESUME")
-            patch.recordedAt = new Date(Date.now() - 5000).toISOString();
+            patch.recordedAt = new Date(
+              Date.now() - config.mockGpsIntervalMs,
+            ).toISOString();
           const [updated] = await db
             .update(mockLocations)
             .set(patch)
@@ -2264,11 +2297,14 @@ export function registerRoutes(
               .where(eq(mockLocations.tripId, trip.id))
               .limit(1)
           )[0];
-          if (Date.now() - Date.parse(location.recordedAt) < 5000)
+          if (
+            Date.now() - Date.parse(location.recordedAt) <
+            config.mockGpsIntervalMs
+          )
             throw new ApiError(
               409,
               "gps_interval_active",
-              "Mock GPS publishes at most once every five seconds",
+              `Mock GPS publishes at most once every ${config.mockGpsIntervalMs} milliseconds`,
             );
           const updated = await advanceMockGps(db, trip.id);
           return { status: 200, data: updated };

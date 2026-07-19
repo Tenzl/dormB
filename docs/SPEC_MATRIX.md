@@ -42,7 +42,7 @@ Source addendum: [`huong-dan-maplibre-ortools-ktx.md`](../huong-dan-maplibre-ort
 | MAP-004 | Travel matrix and displayed route use the same segment dataset | `buildTravelTimeMatrix` and `buildRouteSections` share `campus-routing.ts`; pure tests cover both | Pass |
 | MAP-005 | Solver includes dispatch-to-first-building cost and rejects incomplete matrices | `startLocationId=CAMPUS_DEPOT`; worker has no geodesic/default-cost fallback | Pass |
 | MAP-006 | MapLibre layers distinguish completed, active, and remaining route | One GeoJSON source with casing, completed gray, remaining pale green, active emerald layers | Pass |
-| MAP-007 | Mock GPS follows the active route and stops at the end | `advanceMockGps` projects onto composed LineString, advances coordinates, reports progress/heading/version, then completes | Pass |
+| MAP-007 | Mock GPS follows the active route and stops at the end | `advanceMockGps` projects onto the composed LineString, advances one coordinate per configured tick, waits at `currentStopId`, and resumes only after stop completion | Pass |
 | MAP-008 | Map remains usable and calm | Campus max bounds, zoom 15–20, no pitch/rotate/world copies, cooperative gestures, route-only fitBounds | Pass |
 | MAP-009 | Map is accessible and resilient | Stable region label, live progress summary, textual route sequence, reduced motion, and map fallback | Pass |
 
@@ -115,7 +115,8 @@ Source addendum: [`huong-dan-maplibre-ortools-ktx.md`](../huong-dan-maplibre-ort
 | FR-017 | Approved shipper can press Ready to Deliver | Shipper action API/UI | Fastify inject smoke: seeded approved shipper received 201 and recommendation | Pass (API smoke) |
 | FR-018 | Atomically select and lock all eligible READY orders | Transactional orchestration | Covered by `IT-BR-006/007` | Planned |
 | FR-019 | Group selected orders by building | Trip builder | Covered by passing primary smoke for `BR-004` | Pass (primary smoke) |
-| FR-020 | Build authorized operational snapshot | Snapshot mapper with allowlist | `UT-FR-020` exact schema and redaction assertion | Planned |
+| FR-020 | Build authorized operational snapshot | Snapshot mapper with allowlist plus versioned prompt input that explains every operational field | Prompt unit test asserts gate coordinates, orders, legal matrix semantics, and full snapshot transmission | Pass (unit) |
+| FR-020A | GPT analyzes operational priority without owning the route | Versioned system prompt limits AI to priorities/weights; OR-Tools remains final route owner | Prompt tests verify retry, waiting, freshness, batching, blocked-road semantics, and AI/solver boundary | Pass (unit) |
 | FR-021 | GPT-5.6 returns validated optimization policy | Structured-output schema, timeout, adapter | `UT-FR-021` valid/invalid/timeout responses | Planned |
 | FR-022 | OR-Tools returns feasible building route | Solver adapter with bounded time | `IT-FR-022` deterministic fixture returns FEASIBLE | Planned |
 | FR-023 | Backend validates route before presentation | Validator gate | Covered by `UT-BR-022` and response-not-published assertion | Planned |
@@ -182,10 +183,10 @@ Source addendum: [`huong-dan-maplibre-ortools-ktx.md`](../huong-dan-maplibre-ort
 | FR-069 | Merchant trip access becomes read-only after Ready | Authorization/state policy | `IT-FR-069` all merchant writes denied from DRAFT_GENERATING onward | Planned |
 | FR-070 | Merchant cannot alter route/stops/shipper/outcomes | No mutation capabilities plus guards | `IT-FR-070` mutation matrix returns forbidden/conflict | Planned |
 | FR-071 | Merchant monitors progress/outcomes | Read projection/UI | `E2E-FR-071` merchant sees live read-only state | Planned |
-| FR-072 | Deterministic mock waypoint playback | Seeded waypoint service/control | Backend playback test starts seeded route and persists PLAYING state | Pass (API) |
-| FR-073 | Publish mock location every five seconds | Playback cadence | Backend timer test advances from waypoint 0 to 1 on configured five-second publisher interval | Pass |
+| FR-072 | Deterministic mock waypoint playback | Ready action captures the demo campus-gate coordinate; route activation starts playback automatically | Backend integration test proves `ARMED` before activation and automatic `PLAYING` afterward without a separate GPS-start request | Pass (API) |
+| FR-073 | Publish mock location every one second | `MOCK_GPS_INTERVAL_MS=1000`; backend scheduler is authoritative and frontend refreshes every 1000 ms | Backend timer test observes automatic coordinate progress after one second; frontend API contract test covers the start payload | Pass |
 | FR-074 | Frontend interpolates marker movement | Transform-based map animation | Marker transition is transform-only; global reduced-motion rule collapses transitions | Pass |
-| FR-075 | Current mock point is route origin | Snapshot construction | `UT-FR-075` initial and revised snapshots use latest persisted point | Planned |
+| FR-075 | Current mock point is route origin | Ready payload persists the gate coordinate before recommendation generation; snapshot derives `startLocationId` and shipper coordinates from it | Backend integration test asserts `CAMPUS_DEPOT` and exact latitude/longitude in the AI/solver snapshot | Pass (API) |
 | FR-076 | Preserve mock progress across reload | Persisted MockLocationState | Backend test reads persisted waypoint/status through API after tick | Pass (API) |
 | FR-077 | Demo reset control | Protected demo-only UI/API/script | Root start/reset/stop rehearsal succeeds; authenticated reset restores seed | Pass (ops rehearsal) |
 | FR-078 | State-changing actions are idempotent | Idempotency keys/transition no-op semantics | API smoke replay succeeded once; frontend contract test verifies mutation key; full concurrency matrix remains | Pass (single-action smoke) |
@@ -215,7 +216,7 @@ Source addendum: [`huong-dan-maplibre-ortools-ktx.md`](../huong-dan-maplibre-ort
 | AS-013 | Recalculate remaining route | Fresh policy/solver result compares routes, preserving immutable stops | BR-020/022; FR-062–068 | Planned |
 | AS-014 | Temporarily unavailable stop | Remaining stop moves later but stays in trip | BR-020; FR-063–065 | Planned |
 | AS-015 | Merchant cannot intervene | Merchant mutation denied while monitoring remains available | BR-001; FR-069–071 | Planned |
-| AS-016 | Mock GPS movement | Five-second updates move marker and refresh ETA | FR-072–076 | Planned |
+| AS-016 | Mock GPS movement | One-second automatic updates move the marker, wait at each current stop, and resume after stop completion | FR-072–076 | Pass (API path) |
 | AS-017 | AI failure | Invalid/timeout output never applies; clear failure/fallback | BR-021/022; FR-082/084 | Planned |
 | AS-018 | Solver validation | Missing/duplicate stop recommendation rejected without route change | BR-022; FR-083 | Planned |
 
@@ -282,7 +283,7 @@ These observations were captured while implementation was being produced in para
 | Pass | Frontend production build succeeds and all 9 Vitest files / 24 tests pass | EXT-013; FR-003/039/045–048/074/078/079, multi-order request contract, student tracking stages, route-layer phases, live ETA, public landing, role routing, sign-in/shipper/API request contracts, and monotonic route progress | Final build and test evidence |
 | Pass | Root README workflow starts all three services, reports solver/API/web health, performs authenticated reset, and stops recorded process trees | FR-077, NFR-008/009, SC-017 | Rehearsed locally with `Start-Demo.ps1`, `Reset-Demo.ps1`, and `Stop-Demo.ps1` |
 | Pass | Atomic Ready claim, later-ready exclusion, membership uniqueness, route validation, countdown reconciliation/cancel, route-prefix immutability, wait lock, one redelivery, and GPS tick have passing backend tests | BR-002/004/006/007/008/011/018–020/022; core AS | Backend `tests/api.test.ts` |
-| Pass | Live API smoke verifies foreign merchant 403, own student access, merchant confirmation denial, exact five-second deadline, early activation denial, post-deadline activation, immediate Delivered, locked TEMP_WAITING, and idempotent replay | FR-004/030/032/033/035/038/039/078 | Fastify inject against the isolated PostgreSQL Docker test database |
+| Pass | Live API smoke verifies foreign merchant 403, own student access, merchant confirmation denial, exact five-second deadline, early activation denial, post-deadline activation, immediate Delivered, locked TEMP_WAITING, and idempotent replay | FR-004/030/032/033/035/038/039/078 | Fastify inject against the isolated local PostgreSQL test database |
 | Pass | Live browser flow used the real OR-Tools worker: 3 eligible READY orders became 2 building stops, solver source was not fallback, route was confirmed, countdown reached IN_PROGRESS, then announce/arrive exposed Delivered while unavailable remained locked at 112s | AS-003/005/006/016; FR-017–024/028–040 | Browser E2E on the integrated local stack |
 | Pass | Mobile 390px and desktop 1440px layouts were visually inspected | NFR-001, SC-001/013/017, UI DoD | Critical controls and live route remained usable at both widths |
 | Evidence gap | Worker test proves schema/health/every-stop inclusion, but does not vary each objective weight to prove order sensitivity | G-003/004, spec §12.4 | Recommended additional solver fixtures; implementation includes all terms |

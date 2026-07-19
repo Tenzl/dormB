@@ -87,6 +87,33 @@ describe("API contract", () => {
     expect(headers["Idempotency-Key"]).toHaveLength(36);
   });
 
+  it("sends the captured campus-gate coordinate when the shipper starts", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() =>
+        jsonResponse(
+          { data: { tripId: "trip-1", recommendationId: "route-1" } },
+          201,
+        ),
+      );
+    const { api } = await import("./api");
+    await api.readyToDeliver({
+      latitude: 10.883162,
+      longitude: 106.781156,
+      recordedAt: "2026-07-19T06:00:00.000Z",
+      source: "DEMO_GATE",
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({
+      start_location: {
+        latitude: 10.883162,
+        longitude: 106.781156,
+        recorded_at: "2026-07-19T06:00:00.000Z",
+        source: "DEMO_GATE",
+      },
+    });
+  });
+
   it("places each product as an independent student order", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")

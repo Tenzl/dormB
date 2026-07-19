@@ -10,7 +10,7 @@ let app: FastifyInstance;
 const key = () => `test-${crypto.randomUUID()}`;
 const testDatabaseUrl =
   process.env.TEST_DATABASE_URL ??
-  "postgresql://dormitory:dormitory@127.0.0.1:5433/dormitory_test";
+  "postgresql://dormitory:dormitory@127.0.0.1:5432/dormitory_test";
 async function login(email: string) {
   const response = await app.inject({
     method: "POST",
@@ -662,7 +662,41 @@ describe("countdown, wait lock and route immutability", () => {
     ).json().data;
     expect(view.status).toBe("AWAITING_SHIPPER_CONFIRMATION");
   });
-  it("persists mock GPS playback and advances on the five-second publisher interval", async () => {
+  it("uses the gate coordinate sent by the shipper in the AI and solver snapshot", async () => {
+    const shipper = await login("shipper@demo.local");
+    const recordedAt = new Date().toISOString();
+    const ready = await app.inject({
+      method: "POST",
+      url: "/api/v1/shipper/trips/ready",
+      headers: { ...auth(shipper), "idempotency-key": key() },
+      payload: {
+        start_location: {
+          latitude: 10.883162,
+          longitude: 106.781156,
+          recorded_at: recordedAt,
+          source: "DEMO_GATE",
+        },
+      },
+    });
+    expect(ready.statusCode).toBe(201);
+    const view = (
+      await app.inject({
+        method: "GET",
+        url: `/api/v1/trips/${ready.json().data.tripId}`,
+        headers: auth(shipper),
+      })
+    ).json().data;
+    const snapshot = view.recommendations[0].snapshot;
+    expect(snapshot.startLocationId).toBe("CAMPUS_DEPOT");
+    expect(snapshot.shipper.currentLatitude).toBe(10.883162);
+    expect(snapshot.shipper.currentLongitude).toBe(106.781156);
+    expect(view.mockLocation).toMatchObject({
+      latitude: 10.883162,
+      longitude: 106.781156,
+      playbackStatus: "ARMED",
+    });
+  });
+  it("starts mock GPS automatically and publishes every one second", async () => {
     const shipper = await login("shipper@demo.local"),
       tripId = await createAndStart(shipper);
     const before = (
@@ -672,13 +706,8 @@ describe("countdown, wait lock and route immutability", () => {
         headers: auth(shipper),
       })
     ).json().data;
-    await app.inject({
-      method: "POST",
-      url: `/api/v1/trips/${tripId}/mock-location/playback`,
-      headers: { ...auth(shipper), "idempotency-key": key() },
-      payload: { action: "START" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(before.mockLocation.playbackStatus).toBe("PLAYING");
+    await new Promise((resolve) => setTimeout(resolve, 1400));
     const location = (
       await app.inject({
         method: "GET",
@@ -686,8 +715,10 @@ describe("countdown, wait lock and route immutability", () => {
         headers: auth(shipper),
       })
     ).json().data;
-    expect(location.waypointIndex).toBe(1);
-    expect(location.playbackStatus).toBe("PLAYING");
+    expect(location.waypointIndex).toBeGreaterThan(0);
+    expect(["PLAYING", "WAITING_AT_STOP"]).toContain(
+      location.playbackStatus,
+    );
     expect(location.routeVersion).toBeGreaterThan(1);
     expect(location.progressRatio).toBeGreaterThan(0);
     expect(typeof location.heading).toBe("number");

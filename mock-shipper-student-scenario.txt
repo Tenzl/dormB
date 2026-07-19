@@ -1,0 +1,159 @@
+COURTYARD - KỊCH BẢN DEMO GPS SHIPPER 1 GIÂY/LẦN
+================================================
+
+MỤC TIÊU
+--------
+- Không cần GPS thật trong giai đoạn demo.
+- Shipper chỉ bấm "Ready to deliver" một lần.
+- Frontend gửi tọa độ cổng vào KTX cho backend ngay lúc bấm.
+- Backend khóa danh sách đơn READY thành một snapshot cố định.
+- AI phân tích ưu tiên; OR-Tools xếp thứ tự các tòa từ vị trí cổng.
+- Sau khi shipper xác nhận route và countdown kết thúc, backend tự phát một
+  tọa độ mỗi 1 giây. Không có nút Start GPS riêng.
+- GPS tự dừng tại tòa hiện tại. Sau khi shipper hoàn tất stop, GPS tự chạy tới
+  tòa kế tiếp.
+
+
+1. TỌA ĐỘ KHỞI HÀNH
+-------------------
+
+locationId = CAMPUS_DEPOT
+latitude   = 10.883162
+longitude  = 106.781156
+source     = DEMO_GATE
+
+Payload frontend gửi khi shipper bấm "Ready to deliver":
+
+POST /api/v1/shipper/trips/ready
+{
+  "start_location": {
+    "latitude": 10.883162,
+    "longitude": 106.781156,
+    "recorded_at": "<ISO-8601 now>",
+    "source": "DEMO_GATE"
+  }
+}
+
+Backend chỉ chấp nhận điểm demo nằm trong bán kính 30 m quanh CAMPUS_DEPOT.
+Snapshot gửi cho AI/OR-Tools phải giữ đúng currentLatitude/currentLongitude này.
+
+
+2. MOCK ORDERS
+--------------
+
+ORDER-A: An Tran, Green Bowl, tòa C3, READY, PRIORITY, vào trip hiện tại.
+ORDER-B: An Tran, Green Bowl, tòa C3, PREPARING, PRIORITY, đợi trip sau.
+ORDER-C: Chi Pham, Green Bowl, tòa D2, READY, NORMAL, vào trip hiện tại.
+
+Snapshot của trip chỉ gồm ORDER-A và ORDER-C. ORDER-B không được chèn vào trip
+ngay cả khi chuyển sang READY sau đó.
+
+Route mẫu do policy + solver chọn:
+CAMPUS_DEPOT -> C3 -> D2
+
+Tuyến C3 -> D2 phải quay xuống đường dịch vụ phía dưới, không đi xuyên công
+viên trung tâm và không đi qua các cổng đã khóa.
+
+
+3. TRẠNG THÁI GPS TỰ ĐỘNG
+------------------------
+
+ARMED
+  Đã lưu vị trí cổng; AI/OR-Tools đang tạo route hoặc chờ shipper xác nhận.
+
+PLAYING
+  Route đã kích hoạt; backend phát tọa độ tiếp theo mỗi 1 giây.
+
+WAITING_AT_STOP
+  Đã tới cuối đoạn đường của currentStopId. GPS không chạy sang tòa kế tiếp.
+
+PLAYING (lần tiếp theo)
+  Shipper hoàn tất stop; backend chuyển currentStopId và tự tiếp tục phát GPS.
+
+STOPPED / COMPLETED
+  Trip đã kết thúc hoặc demo bị dừng.
+
+
+4. TỌA ĐỘ CAMPUS_DEPOT -> C3
+----------------------------
+
+T+00 [106.781156, 10.883162]  vị trí cổng
+T+01 [106.781006, 10.883041]
+T+02 [106.780740, 10.882827]
+T+03 [106.780652, 10.882928]
+T+04 [106.780525, 10.882836]
+T+05 [106.780273, 10.883127]
+T+06 [106.779995, 10.883468]
+T+07 [106.780111, 10.883552]
+T+08 [106.780315, 10.883698]
+T+09 [106.780340, 10.883756]  tới C3 -> WAITING_AT_STOP
+
+Tại C3:
+1. Shipper đã bấm "Heading to this building" thì Student A thấy route từ vị
+   trí shipper hiện tại tới C3. Student B vẫn chỉ thấy marker shipper và D2.
+2. Shipper bấm "Mark arrived", chọn outcome riêng cho từng order.
+3. ORDER-A -> DELIVERED.
+4. Shipper bấm "Complete stop".
+5. Backend đặt D2 thành currentStopId và đổi GPS sang PLAYING.
+
+
+5. TỌA ĐỘ C3 -> D2
+-------------------
+
+Mỗi dòng sau tiếp tục cách dòng trước đúng 1 giây:
+
+T+01 [106.780315, 10.883698]
+T+02 [106.780111, 10.883552]
+T+03 [106.779995, 10.883468]
+T+04 [106.780273, 10.883127]
+T+05 [106.780525, 10.882836]
+T+06 [106.780652, 10.882928]
+T+07 [106.780740, 10.882827]
+T+08 [106.781006, 10.883041]
+T+09 [106.781156, 10.883162]
+T+10 [106.781472, 10.883416]
+T+11 [106.781799, 10.883679]
+T+12 [106.781516, 10.884007]
+T+13 [106.781481, 10.884048]
+T+14 [106.781597, 10.884156]
+T+15 [106.781632, 10.884217]
+T+16 [106.781675, 10.884291]
+T+17 [106.781741, 10.884338]  tới D2 -> WAITING_AT_STOP
+
+Tại D2, shipper thao tác Heading -> Mark arrived -> outcome -> Complete stop.
+ORDER-C -> DELIVERED. Trip -> COMPLETED.
+
+
+6. HIỂN THỊ THEO ROLE
+---------------------
+
+SHIPPER
+- Thấy full route CAMPUS_DEPOT -> C3 -> D2 và marker di chuyển mỗi giây.
+- Không có bảng nút Start/Pause/Resume GPS riêng.
+- Thấy trạng thái ngắn: Moving hoặc Waiting at stop.
+
+STUDENT A (C3)
+- Luôn thấy marker C3.
+- Khi trip đã bắt đầu: thấy vị trí shipper, chưa thấy route nếu chưa được gọi.
+- Sau "Heading to this building": chỉ thấy route hiện tại -> C3.
+- ORDER-B vẫn là PREPARING/READY FOR NEXT TRIP, độc lập với ORDER-A.
+
+STUDENT B (D2)
+- Luôn thấy marker D2 và vị trí shipper khi trip đã bắt đầu.
+- Chưa tới lượt: không thấy route tới D2.
+- Sau khi D2 là current stop và shipper bấm Heading: thấy route hiện tại -> D2.
+
+ADMIN / MERCHANT
+- Thấy full operational route và vị trí shipper được backend cập nhật mỗi giây.
+
+
+7. KẾT QUẢ MONG ĐỢI
+-------------------
+
+ORDER-A = DELIVERED trong trip hiện tại.
+ORDER-C = DELIVERED trong trip hiện tại.
+ORDER-B = READY, tripId = null, PENDING_NEXT_TRIP và vẫn giữ PRIORITY.
+
+Frontend polling = 1000 ms.
+Backend MOCK_GPS_INTERVAL_MS = 1000.
+Frontend nội suy giữa hai bản ghi để marker chuyển động mượt.

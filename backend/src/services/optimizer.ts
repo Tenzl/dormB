@@ -2,6 +2,11 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
+import {
+  buildOptimizationPolicyInput,
+  OPTIMIZATION_POLICY_PROMPT_VERSION,
+  OPTIMIZATION_POLICY_SYSTEM_PROMPT,
+} from '../prompts/optimization-policy.js';
 
 export const SnapshotSchema = z.object({
   generatedAt: z.string(), startLocationId: z.string(), merchantId: z.string(),
@@ -14,10 +19,10 @@ export const SnapshotSchema = z.object({
 });
 export type OperationalSnapshot = z.infer<typeof SnapshotSchema>;
 const PolicySchema = z.object({
-  buildingPriorities: z.array(z.object({ buildingId: z.string(), priorityScore: z.number().min(0).max(100), reasons: z.array(z.string()) })),
-  objectiveWeights: z.object({ travelTime: z.number().nonnegative(), orderWaiting: z.number().nonnegative(), freshnessRisk: z.number().nonnegative(), buildingBatchValue: z.number().nonnegative(), routeChangePenalty: z.number().nonnegative() }),
+  buildingPriorities: z.array(z.object({ buildingId: z.string(), priorityScore: z.number().min(0).max(100), reasons: z.array(z.string()).min(1).max(4) })),
+  objectiveWeights: z.object({ travelTime: z.number().min(0).max(5), orderWaiting: z.number().min(0).max(5), freshnessRisk: z.number().min(0).max(5), buildingBatchValue: z.number().min(0).max(5), routeChangePenalty: z.number().min(0).max(5) }),
   hardConstraints: z.object({ preserveCurrentStop: z.literal(true), preserveCompletedStops: z.literal(true), includeEveryEligibleOrder: z.literal(true), excludeUnavailableBuildingIds: z.array(z.string()) }),
-  explanation: z.array(z.string()), recommendationNeeded: z.boolean(),
+  explanation: z.array(z.string()).min(1).max(5), recommendationNeeded: z.boolean(),
 });
 export type OptimizationPolicy = z.infer<typeof PolicySchema>;
 
@@ -25,35 +30,74 @@ function fallbackPolicy(snapshot: OperationalSnapshot): OptimizationPolicy {
   const grouped = new Map<string, typeof snapshot.orders>();
   for (const order of snapshot.orders) grouped.set(order.buildingId, [...(grouped.get(order.buildingId) ?? []), order]);
   return {
-    buildingPriorities: [...grouped.entries()].map(([buildingId, list]) => ({ buildingId, priorityScore: Math.min(100, Math.max(...list.map(o => o.minutesWaiting), 0) * 1.5 + Math.max(...list.map(o => ({ LOW: 10, MEDIUM: 25, HIGH: 45 }[o.freshnessRisk]))) + list.length * 6), reasons: [`${list.length} grouped order(s)`, 'Waiting time and freshness risk considered'] })),
+    buildingPriorities: [...new Set(snapshot.remainingStops.map((stop) => stop.buildingId))].map((buildingId) => {
+      const list = grouped.get(buildingId) ?? [];
+      const retry = list.some((order) => order.deliveryAttempt === 2 || order.status !== 'READY');
+      const maximumWait = Math.max(...list.map((order) => order.minutesWaiting), 0);
+      const maximumRisk = Math.max(...list.map((order) => ({ LOW: 10, MEDIUM: 25, HIGH: 45 }[order.freshnessRisk])), 0);
+      return {
+        buildingId,
+        priorityScore: Math.min(100, (retry ? 30 : 0) + maximumWait * 1.5 + maximumRisk + list.length * 6),
+        reasons: [
+          ...(retry ? ['Có đơn giao lại lần hai'] : []),
+          `${list.length} đơn được gom tại cùng tòa`,
+          `Đã chờ tối đa ${Math.round(maximumWait)} phút; rủi ro độ tươi đã được tính`,
+        ],
+      };
+    }),
     objectiveWeights: { travelTime: 1, orderWaiting: 1.2, freshnessRisk: 1.5, buildingBatchValue: .8, routeChangePenalty: 1.1 },
     hardConstraints: { preserveCurrentStop: true, preserveCompletedStops: true, includeEveryEligibleOrder: true, excludeUnavailableBuildingIds: snapshot.remainingStops.filter(s => s.temporarilyUnavailable).map(s => s.buildingId) },
     explanation: ['Deterministic fallback policy used; waiting, freshness, distance and batch size remain represented.'], recommendationNeeded: true,
   };
 }
 
-export async function createPolicy(config: Config, snapshot: OperationalSnapshot): Promise<{ policy: OptimizationPolicy; source: 'OPENAI' | 'FALLBACK'; warning?: string }> {
+export function validatePolicyAgainstSnapshot(
+  snapshot: OperationalSnapshot,
+  candidate: unknown,
+): OptimizationPolicy {
+  const policy = PolicySchema.parse(candidate);
+  const expectedBuildingIds = [...new Set(snapshot.remainingStops.map((stop) => stop.buildingId))];
+  const actualBuildingIds = policy.buildingPriorities.map((item) => item.buildingId);
+  if (
+    actualBuildingIds.length !== expectedBuildingIds.length ||
+    new Set(actualBuildingIds).size !== actualBuildingIds.length ||
+    expectedBuildingIds.some((buildingId) => !actualBuildingIds.includes(buildingId))
+  )
+    throw new Error('Policy must prioritize every candidate building exactly once');
+  const expectedUnavailable = expectedBuildingIds
+    .filter((buildingId) => snapshot.remainingStops.some((stop) => stop.buildingId === buildingId && stop.temporarilyUnavailable))
+    .sort();
+  const actualUnavailable = [...policy.hardConstraints.excludeUnavailableBuildingIds].sort();
+  if (
+    actualUnavailable.length !== expectedUnavailable.length ||
+    actualUnavailable.some((buildingId, index) => buildingId !== expectedUnavailable[index])
+  )
+    throw new Error('Policy changed the authoritative unavailable-building set');
+  return policy;
+}
+
+export async function createPolicy(config: Config, snapshot: OperationalSnapshot): Promise<{ policy: OptimizationPolicy; source: 'OPENAI' | 'FALLBACK'; promptVersion: string; warning?: string }> {
   SnapshotSchema.parse(snapshot);
-  if (!config.openaiApiKey) return { policy: fallbackPolicy(snapshot), source: 'FALLBACK', warning: 'OpenAI unavailable; deterministic policy used.' };
+  if (!config.openaiApiKey) return { policy: fallbackPolicy(snapshot), source: 'FALLBACK', promptVersion: OPTIMIZATION_POLICY_PROMPT_VERSION, warning: 'OpenAI unavailable; deterministic policy used.' };
   try {
     const client = new OpenAI({ apiKey: config.openaiApiKey, timeout: config.openaiTimeoutMs, maxRetries: 0 });
     const response = await client.responses.create({
-      model: config.openaiModel, instructions: 'Create optimization policy only. Never mutate state. Include only snapshot building IDs. Return strict JSON.', input: JSON.stringify(snapshot),
+      model: config.openaiModel,
+      instructions: OPTIMIZATION_POLICY_SYSTEM_PROMPT,
+      input: buildOptimizationPolicyInput(snapshot),
       text: { format: { type: 'json_schema', name: 'optimization_policy', strict: true, schema: {
         type:'object', additionalProperties:false, required:['buildingPriorities','objectiveWeights','hardConstraints','explanation','recommendationNeeded'], properties:{
-          buildingPriorities:{type:'array',items:{type:'object',additionalProperties:false,required:['buildingId','priorityScore','reasons'],properties:{buildingId:{type:'string'},priorityScore:{type:'number'},reasons:{type:'array',items:{type:'string'}}}}},
-          objectiveWeights:{type:'object',additionalProperties:false,required:['travelTime','orderWaiting','freshnessRisk','buildingBatchValue','routeChangePenalty'],properties:{travelTime:{type:'number'},orderWaiting:{type:'number'},freshnessRisk:{type:'number'},buildingBatchValue:{type:'number'},routeChangePenalty:{type:'number'}}},
+          buildingPriorities:{type:'array',items:{type:'object',additionalProperties:false,required:['buildingId','priorityScore','reasons'],properties:{buildingId:{type:'string'},priorityScore:{type:'number',minimum:0,maximum:100},reasons:{type:'array',minItems:1,maxItems:4,items:{type:'string'}}}}},
+          objectiveWeights:{type:'object',additionalProperties:false,required:['travelTime','orderWaiting','freshnessRisk','buildingBatchValue','routeChangePenalty'],properties:{travelTime:{type:'number',minimum:0,maximum:5},orderWaiting:{type:'number',minimum:0,maximum:5},freshnessRisk:{type:'number',minimum:0,maximum:5},buildingBatchValue:{type:'number',minimum:0,maximum:5},routeChangePenalty:{type:'number',minimum:0,maximum:5}}},
           hardConstraints:{type:'object',additionalProperties:false,required:['preserveCurrentStop','preserveCompletedStops','includeEveryEligibleOrder','excludeUnavailableBuildingIds'],properties:{preserveCurrentStop:{const:true},preserveCompletedStops:{const:true},includeEveryEligibleOrder:{const:true},excludeUnavailableBuildingIds:{type:'array',items:{type:'string'}}}},
-          explanation:{type:'array',items:{type:'string'}},recommendationNeeded:{type:'boolean'}
+          explanation:{type:'array',minItems:1,maxItems:5,items:{type:'string'}},recommendationNeeded:{type:'boolean'}
         }
       } } }
     });
-    const policy = PolicySchema.parse(JSON.parse(response.output_text));
-    const valid = new Set(snapshot.buildings.map(b => b.buildingId));
-    if (policy.buildingPriorities.some(p => !valid.has(p.buildingId))) throw new Error('Policy contains unknown building');
-    return { policy, source: 'OPENAI' };
+    const policy = validatePolicyAgainstSnapshot(snapshot, JSON.parse(response.output_text));
+    return { policy, source: 'OPENAI', promptVersion: OPTIMIZATION_POLICY_PROMPT_VERSION };
   } catch (error) {
-    return { policy: fallbackPolicy(snapshot), source: 'FALLBACK', warning: `OpenAI policy failed; fallback used (${error instanceof Error ? error.name : 'unknown'}).` };
+    return { policy: fallbackPolicy(snapshot), source: 'FALLBACK', promptVersion: OPTIMIZATION_POLICY_PROMPT_VERSION, warning: `OpenAI policy failed; fallback used (${error instanceof Error ? error.name : 'unknown'}).` };
   }
 }
 

@@ -158,6 +158,13 @@ export interface Trip {
     progressRatio: number;
     routeVersion: number;
     coordinateIndex?: number;
+    playbackStatus?:
+      | "ARMED"
+      | "PLAYING"
+      | "WAITING_AT_STOP"
+      | "PAUSED"
+      | "STOPPED"
+      | "COMPLETED";
     updatedAt: string;
     x?: number;
     y?: number;

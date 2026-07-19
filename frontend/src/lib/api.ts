@@ -169,6 +169,7 @@ function mapTrip(raw: Raw | null, knownOrders: Order[]): Trip | null {
       progressRatio: raw.mockLocation?.progressRatio ?? 0,
       routeVersion: raw.mockLocation?.routeVersion ?? raw.routeVersion ?? 1,
       coordinateIndex: raw.mockLocation?.coordinateIndex ?? raw.mockLocation?.waypointIndex,
+      playbackStatus: raw.mockLocation?.playbackStatus ?? undefined,
       x:
         raw.mockLocation?.mapXRatio != null
           ? raw.mockLocation.mapXRatio *
@@ -489,10 +490,29 @@ export const api = {
     mutate(`/merchant/shipper-memberships/${id}/deactivate`, {
       method: "POST",
     }),
-  readyToDeliver: () =>
+  readyToDeliver: (startLocation?: {
+    latitude: number;
+    longitude: number;
+    recordedAt: string;
+    source: "DEMO_GATE";
+  }) =>
     mutate<{ tripId: string; recommendationId: string }>(
       "/shipper/trips/ready",
-      { method: "POST" },
+      {
+        method: "POST",
+        ...(startLocation
+          ? {
+              body: JSON.stringify({
+                start_location: {
+                  latitude: startLocation.latitude,
+                  longitude: startLocation.longitude,
+                  recorded_at: startLocation.recordedAt,
+                  source: startLocation.source,
+                },
+              }),
+            }
+          : {}),
+      },
     ),
   confirmRoute: (recommendationId: string) =>
     mutate(`/route-recommendations/${recommendationId}/confirm`, {

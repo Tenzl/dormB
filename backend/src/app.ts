@@ -35,10 +35,16 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     () => void tickCountdowns(db).catch(console.error),
     250,
   );
-  const gpsTimer = setInterval(
-    () => void tickMockGps(db).catch(console.error),
-    1000,
-  );
+  let gpsTickRunning = false;
+  const gpsTimer = setInterval(() => {
+    if (gpsTickRunning) return;
+    gpsTickRunning = true;
+    void tickMockGps(db, config.mockGpsIntervalMs)
+      .catch(console.error)
+      .finally(() => {
+        gpsTickRunning = false;
+      });
+  }, Math.min(250, Math.max(50, Math.floor(config.mockGpsIntervalMs / 4))));
   app.addHook("onClose", async () => {
     clearInterval(countdownTimer);
     clearInterval(gpsTimer);

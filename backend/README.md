@@ -1,17 +1,20 @@
 # Dormitory Batch Delivery API
 
-TypeScript/Fastify API with Drizzle ORM and PostgreSQL 17. Route policy is produced by OpenAI structured output (`gpt-5.6` by default) with a deterministic fallback. Feasible route calculation is delegated to the stateless OR-Tools HTTP worker in `../solver-worker` and every result is validated by this API before persistence.
+TypeScript/Fastify API with Drizzle ORM and local PostgreSQL. Route policy is produced by OpenAI structured output (`gpt-5.6` by default) with a deterministic fallback. Feasible route calculation is delegated to the stateless OR-Tools HTTP worker in `../solver-worker` and every result is validated by this API before persistence.
 
 ## Run locally
 
 ```powershell
-cd D:\openAI\dormitoryB\backend
+cd D:\openAI\dormitoryB
+.\scripts\Setup-Postgres.ps1
+cd backend
 Copy-Item .env.example .env
 npm install
-docker compose --project-directory .. up -d --wait postgres
 npm run seed:reset
 npm run dev
 ```
+
+`Setup-Postgres.ps1` targets native PostgreSQL on `127.0.0.1:5432` and creates the `dormitory` / `dormitory_test` databases. Docker is not used.
 
 The API listens on `http://localhost:8000`; health is `GET /health`, OpenAPI-style route discovery is represented by the Fastify routes, and all product endpoints are under `/api/v1`. Start the solver separately on port 8010 as documented in `../solver-worker/README.md`. If the worker or OpenAI is unavailable, the API uses a labeled deterministic fallback without allowing either external component to write application state.
 

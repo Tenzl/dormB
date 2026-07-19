@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, ApiError } from "../lib/api";
+import { captureDemoShipperStartLocation } from "../lib/demoGps";
 import { demoAccounts, initialDemoState } from "../data/seed";
 import type {
   AsyncState,
@@ -205,7 +206,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!session || demoFallback) return;
     const timer = window.setInterval(() => {
       void refresh();
-    }, 2000);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [session, demoFallback, refresh]);
 
@@ -512,7 +513,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           ),
         }));
       } else {
-        const created = await api.readyToDeliver();
+        const created = await api.readyToDeliver(
+          captureDemoShipperStartLocation(),
+        );
         const loaded = await api.getTrip(created.tripId, data);
         setData((value) => ({
           ...value,

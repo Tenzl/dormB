@@ -22,7 +22,7 @@ function Stop-DemoProcessTree([int]$ParentId) {
         foreach ($child in $children) { Stop-DemoProcessTree ([int]$child.ProcessId) }
     }
     $process = Get-Process -Id $ParentId -ErrorAction SilentlyContinue
-    if ($process) { Stop-Process -Id $ParentId -Force }
+    if ($process) { Stop-Process -Id $ParentId -Force -ErrorAction SilentlyContinue }
 }
 
 foreach ($processId in $processIds) {
@@ -34,5 +34,4 @@ foreach ($processId in $processIds) {
 }
 
 Remove-Item -LiteralPath $statePath -Force
-docker compose --project-directory $workspace stop postgres | Out-Null
-Write-Host 'Demo services stopped.'
+Write-Host 'Demo services stopped. Local PostgreSQL was left running as a system service.'

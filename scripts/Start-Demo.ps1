@@ -16,6 +16,7 @@ $venvPath = Join-Path $workspace '.venv'
 $requirementsPath = Join-Path $solverPath 'requirements.txt'
 $statePath = Join-Path $workspace '.demo-processes.json'
 $logPath = Join-Path $workspace '.demo-logs'
+$defaultDatabaseUrl = 'postgresql://dormitory:dormitory@127.0.0.1:5432/dormitory'
 
 function Import-DemoEnvironment([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -35,6 +36,83 @@ function Import-DemoEnvironment([string]$Path) {
             $value = $value.Substring(1, $value.Length - 2)
         }
         Set-Item -Path "Env:$name" -Value $value
+    }
+}
+
+function Get-DatabaseEndpoint([string]$DatabaseUrl) {
+    $uri = [Uri]$DatabaseUrl
+    return [pscustomobject]@{
+        Host = if ($uri.Host) { $uri.Host } else { '127.0.0.1' }
+        Port = if ($uri.Port -gt 0) { $uri.Port } else { 5432 }
+    }
+}
+
+function Wait-ForPostgres([string]$DatabaseUrl) {
+    $endpoint = Get-DatabaseEndpoint $DatabaseUrl
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
+    $reachable = $false
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            $async = $client.BeginConnect($endpoint.Host, $endpoint.Port, $null, $null)
+            $ok = $async.AsyncWaitHandle.WaitOne(1000, $false)
+            if ($ok -and $client.Connected) {
+                $client.Close()
+                $reachable = $true
+                break
+            }
+            $client.Close()
+        } catch {
+            Start-Sleep -Milliseconds 400
+        }
+    }
+    if (-not $reachable) {
+        throw @"
+PostgreSQL is not reachable at $($endpoint.Host):$($endpoint.Port).
+Install PostgreSQL locally, start the Windows service, then run:
+  .\scripts\Setup-Postgres.ps1
+"@
+    }
+
+    $psql = $null
+    $fromPath = Get-Command psql -ErrorAction SilentlyContinue
+    if ($fromPath) {
+        $psql = $fromPath.Source
+    } else {
+        foreach ($candidate in @(
+            'C:\Program Files\PostgreSQL\18\bin\psql.exe',
+            'C:\Program Files\PostgreSQL\17\bin\psql.exe',
+            'C:\Program Files\PostgreSQL\16\bin\psql.exe'
+        )) {
+            if (Test-Path -LiteralPath $candidate) { $psql = $candidate; break }
+        }
+    }
+    if (-not $psql) { return }
+
+    $uri = [Uri]$DatabaseUrl
+    $userInfo = $uri.UserInfo.Split(':', 2)
+    $dbUser = if ($userInfo.Count -ge 1 -and $userInfo[0]) { [Uri]::UnescapeDataString($userInfo[0]) } else { 'dormitory' }
+    $dbPassword = if ($userInfo.Count -ge 2) { [Uri]::UnescapeDataString($userInfo[1]) } else { 'dormitory' }
+    $dbName = $uri.AbsolutePath.Trim('/')
+    if (-not $dbName) { $dbName = 'dormitory' }
+
+    $previousPassword = $env:PGPASSWORD
+    $env:PGPASSWORD = $dbPassword
+    try {
+        & $psql -U $dbUser -h $endpoint.Host -p $endpoint.Port -d $dbName -v ON_ERROR_STOP=1 -c 'SELECT 1;' 1>$null 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw @"
+PostgreSQL accepted TCP connections, but login failed for user '$dbUser' on database '$dbName'.
+Create the local role and databases once:
+  .\scripts\Setup-Postgres.ps1
+"@
+        }
+    } finally {
+        if ($null -eq $previousPassword) {
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        } else {
+            $env:PGPASSWORD = $previousPassword
+        }
     }
 }
 
@@ -59,15 +137,23 @@ Import-DemoEnvironment $backendEnvPath
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw 'npm was not found. Install Node.js 22 and reopen PowerShell.'
 }
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw 'Docker was not found. PostgreSQL runs through Docker Compose.'
+
+function Invoke-NpmInstall([string]$PackagePath, [string]$Label) {
+    if (-not (Test-Path -LiteralPath (Join-Path $PackagePath 'package.json'))) {
+        throw "$Label package.json was not found at $PackagePath."
+    }
+    Push-Location -LiteralPath $PackagePath
+    try {
+        npm install
+        if ($LASTEXITCODE -ne 0) { throw "$Label npm install failed." }
+    } finally {
+        Pop-Location
+    }
 }
 
 if ($Install) {
-    npm --prefix $backendPath install
-    if ($LASTEXITCODE -ne 0) { throw 'Backend npm install failed.' }
-    npm --prefix $frontendPath install
-    if ($LASTEXITCODE -ne 0) { throw 'Frontend npm install failed.' }
+    Invoke-NpmInstall $backendPath 'Backend'
+    Invoke-NpmInstall $frontendPath 'Frontend'
 
     if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
         throw 'python was not found. Install Python 3.10+ and reopen PowerShell.'
@@ -103,8 +189,8 @@ if (Test-Path -LiteralPath $statePath) {
     throw 'A demo process file already exists. Run .\scripts\Stop-Demo.ps1 before starting another instance.'
 }
 
-docker compose --project-directory $workspace up -d --wait postgres
-if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL did not start successfully.' }
+$databaseUrl = if ($env:DATABASE_URL) { $env:DATABASE_URL } else { $defaultDatabaseUrl }
+Wait-ForPostgres $databaseUrl
 
 New-Item -ItemType Directory -Path $logPath -Force | Out-Null
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'

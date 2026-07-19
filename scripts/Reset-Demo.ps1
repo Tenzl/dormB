@@ -11,8 +11,13 @@ $backendPath = Join-Path $workspace 'backend'
 $envPath = Join-Path $backendPath '.env'
 
 if ($Offline) {
-    npm --prefix $backendPath run seed:reset
-    if ($LASTEXITCODE -ne 0) { throw 'Offline seed reset failed.' }
+    Push-Location -LiteralPath $backendPath
+    try {
+        npm run seed:reset
+        if ($LASTEXITCODE -ne 0) { throw 'Offline seed reset failed.' }
+    } finally {
+        Pop-Location
+    }
     Write-Host 'Seeded demo state restored offline.'
     exit 0
 }

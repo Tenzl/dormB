@@ -284,6 +284,7 @@ export async function generateRecommendation(
     policyJson: JSON.stringify({
       ...ai.policy,
       source: ai.source,
+      promptVersion: ai.promptVersion,
       warning: ai.warning,
     }),
     currentRouteJson: JSON.stringify(current),
@@ -311,11 +312,24 @@ export async function generateRecommendation(
     type,
     solverSource: solved.source,
     aiSource: ai.source,
+    promptVersion: ai.promptVersion,
   });
   return rec;
 }
 
-export async function createTrip(db: AppDb, config: Config, actor: Actor) {
+export type DemoStartLocation = {
+  latitude: number;
+  longitude: number;
+  recordedAt: string;
+  source: "DEMO_GATE";
+};
+
+export async function createTrip(
+  db: AppDb,
+  config: Config,
+  actor: Actor,
+  startLocation?: DemoStartLocation,
+) {
   const member = await activeMembership(db, actor);
   const active = (
     await db
@@ -429,17 +443,32 @@ export async function createTrip(db: AppDb, config: Config, actor: Actor) {
         "mock_location_missing",
         "Mock GPS seed is missing",
       );
+    if (startLocation) {
+      const nearest = nearestCampusLocation(
+        startLocation.longitude,
+        startLocation.latitude,
+      );
+      if (
+        nearest.location.id !== "CAMPUS_DEPOT" ||
+        nearest.distanceMeters > 30
+      )
+        throw new ApiError(
+          422,
+          "invalid_demo_start_location",
+          "Demo shipper must start within 30 metres of the campus entry gate",
+        );
+    }
     await tx
       .insert(mockLocations)
       .values({
         tripId,
         waypointIndex: waypoint.waypointIndex,
-        latitude: waypoint.latitude,
-        longitude: waypoint.longitude,
-        mapXRatio: waypoint.mapXRatio,
-        mapYRatio: waypoint.mapYRatio,
-        recordedAt: now,
-        playbackStatus: "PAUSED",
+        latitude: startLocation?.latitude ?? waypoint.latitude,
+        longitude: startLocation?.longitude ?? waypoint.longitude,
+        mapXRatio: startLocation ? 0 : waypoint.mapXRatio,
+        mapYRatio: startLocation ? 0 : waypoint.mapYRatio,
+        recordedAt: startLocation?.recordedAt ?? now,
+        playbackStatus: config.demoMode ? "ARMED" : "STOPPED",
       });
     await tx
       .insert(auditEvents)
@@ -449,7 +478,10 @@ export async function createTrip(db: AppDb, config: Config, actor: Actor) {
         merchantId: member.merchantId,
         tripId,
         eventType: "TRIP_GENERATION_STARTED",
-        payloadJson: JSON.stringify({ orderCount: eligible.length }),
+        payloadJson: JSON.stringify({
+          orderCount: eligible.length,
+          startLocationSource: startLocation?.source ?? "SEEDED_GATE",
+        }),
         createdAt: now,
       });
   });
@@ -625,6 +657,10 @@ export async function activateRecommendation(
     type: rec.recommendationType,
   });
   await snapMockLocationToRoute(db, trip.id);
+  await db
+    .update(mockLocations)
+    .set({ playbackStatus: "PLAYING", recordedAt: nowIso() })
+    .where(eq(mockLocations.tripId, trip.id));
   return (
     await db.select().from(trips).where(eq(trips.id, trip.id)).limit(1)
   )[0];
@@ -661,13 +697,13 @@ export async function tickCountdowns(db: AppDb) {
       await reconcileCountdown(db, trip.id);
 }
 
-export async function tickMockGps(db: AppDb) {
+export async function tickMockGps(db: AppDb, intervalMs = 1000) {
   const playing = await db
     .select()
     .from(mockLocations)
     .where(eq(mockLocations.playbackStatus, "PLAYING"));
   for (const location of playing) {
-    if (Date.now() - Date.parse(location.recordedAt) < 5000) continue;
+    if (Date.now() - Date.parse(location.recordedAt) < intervalMs) continue;
     await advanceMockGps(db, location.tripId);
   }
 }
@@ -722,13 +758,29 @@ export async function advanceMockGps(db: AppDb, tripId: string) {
     return stopped;
   }
   const tripStops = await db.select().from(stops).where(eq(stops.tripId, trip.id));
-  const coordinates = combineRouteSections(buildRouteSections(activeRouteStops(trip, tripStops))).geometry.coordinates;
+  const sections = buildRouteSections(activeRouteStops(trip, tripStops));
+  const coordinates = combineRouteSections(sections).geometry.coordinates;
+  const currentSectionIndex = sections.findIndex(
+    (section) => section.destinationStopId === trip.currentStopId,
+  );
+  if (currentSectionIndex < 0) {
+    const [waiting] = await db.update(mockLocations).set({ playbackStatus: "WAITING_AT_STOP", recordedAt: nowIso() }).where(eq(mockLocations.tripId, tripId)).returning();
+    return waiting;
+  }
+  const currentStopEndIndex = Math.max(
+    0,
+    combineRouteSections(sections.slice(0, currentSectionIndex + 1)).geometry.coordinates.length - 1,
+  );
   const projection = routePointProjection(coordinates, location.longitude, location.latitude, location.waypointIndex);
-  const nextIndex = Math.min(projection.coordinateIndex + 1, coordinates.length - 1);
+  if (projection.coordinateIndex >= currentStopEndIndex) {
+    const [waiting] = await db.update(mockLocations).set({ playbackStatus: "WAITING_AT_STOP", recordedAt: nowIso() }).where(eq(mockLocations.tripId, tripId)).returning();
+    return waiting;
+  }
+  const nextIndex = Math.min(projection.coordinateIndex + 1, currentStopEndIndex);
   const next = coordinates[nextIndex];
   if (!next || nextIndex === projection.coordinateIndex) {
-    const [completed] = await db.update(mockLocations).set({ playbackStatus: "COMPLETED", recordedAt: nowIso() }).where(eq(mockLocations.tripId, tripId)).returning();
-    return completed;
+    const [waiting] = await db.update(mockLocations).set({ playbackStatus: "WAITING_AT_STOP", recordedAt: nowIso() }).where(eq(mockLocations.tripId, tripId)).returning();
+    return waiting;
   }
   const [updated] = await db.update(mockLocations).set({
     waypointIndex: nextIndex,
@@ -736,7 +788,7 @@ export async function advanceMockGps(db: AppDb, tripId: string) {
     longitude: next[0],
     mapXRatio: 0,
     mapYRatio: 0,
-    playbackStatus: "PLAYING",
+    playbackStatus: nextIndex === currentStopEndIndex ? "WAITING_AT_STOP" : "PLAYING",
     recordedAt: nowIso(),
   }).where(eq(mockLocations.tripId, tripId)).returning();
   return updated;
