@@ -1,0 +1,16 @@
+.env
+.demo-logs/
+.demo-processes.json
+.venv/
+backend/data/
+backend/dist/
+backend/node_modules/
+frontend/dist/
+frontend/node_modules/
+coverage/
+*.log
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,1 @@
+ALTER TABLE "delivery_stops" ADD COLUMN "announced_at" timestamp with time zone;
